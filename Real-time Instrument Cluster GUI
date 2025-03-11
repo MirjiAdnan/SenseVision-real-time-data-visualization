@@ -1,0 +1,199 @@
+#include "testing.h"
+
+// Qt Includes
+#include <QMainWindow>
+#include <QWidget>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QGridLayout>
+#include <QLabel>
+#include <QFrame>
+#include <QCheckBox>
+#include <QFont>
+#include <QTimer>
+#include <QProcess>
+#include <opencv2/opencv.hpp>  
+#include <opencv2/imgproc.hpp>  
+
+// Windows API for embedding console
+#include <windows.h>
+#include <QWindow>
+#include <QWidget>
+
+using namespace cv;
+
+class testing::Private {
+public:
+    VideoCapture frontCamera;
+    VideoCapture rearCamera;
+    QTimer* frontFrameTimer;
+    QTimer* rearFrameTimer;
+    QLabel* frontCameraLabel;
+    QLabel* rearCameraLabel;
+    QWidget* lidarContainerWidget;
+    QProcess* lidarProcess;
+    HWND lidarConsoleHandle;
+    
+    QVBoxLayout* mainLayout;
+    QGridLayout* cameraFeedLayout;
+    QCheckBox* frontCameraCheck;
+    QCheckBox* backCameraCheck;
+    QCheckBox* lidarCheck;
+
+    Private()
+        : frontFrameTimer(new QTimer),
+        rearFrameTimer(new QTimer),
+        lidarProcess(new QProcess),
+        lidarContainerWidget(new QWidget),
+        lidarConsoleHandle(nullptr),
+        cameraFeedLayout(new QGridLayout) {
+    }
+
+    void updateLayout() {
+        cameraFeedLayout->setParent(nullptr); // Remove previous layout
+        delete cameraFeedLayout;
+        cameraFeedLayout = new QGridLayout();
+
+        int count = 0;
+        if (frontCameraCheck->isChecked()) count++;
+        if (backCameraCheck->isChecked()) count++;
+        if (lidarCheck->isChecked()) count++;
+
+        int width = 1100, height = 600;
+
+        if (count == 1) {
+            if (frontCameraCheck->isChecked()) {
+                cameraFeedLayout->addWidget(frontCameraLabel, 0, 0, 1, 1);
+                frontCameraLabel->setFixedSize(width, height);
+            }
+            else if (backCameraCheck->isChecked()) {
+                cameraFeedLayout->addWidget(rearCameraLabel, 0, 0, 1, 1);
+                rearCameraLabel->setFixedSize(width, height);
+            }
+            else if (lidarCheck->isChecked()) {
+                cameraFeedLayout->addWidget(lidarContainerWidget, 0, 0, 1, 1);
+                lidarContainerWidget->setFixedSize(width, height);
+            }
+        }
+        else if (count == 2) {
+            int halfWidth = width / 2;
+            if (frontCameraCheck->isChecked()) {
+                cameraFeedLayout->addWidget(frontCameraLabel, 0, 0);
+                frontCameraLabel->setFixedSize(halfWidth, height);
+            }
+            if (backCameraCheck->isChecked()) {
+                cameraFeedLayout->addWidget(rearCameraLabel, 0, 1);
+                rearCameraLabel->setFixedSize(halfWidth, height);
+            }
+            if (lidarCheck->isChecked()) {
+                cameraFeedLayout->addWidget(lidarContainerWidget, 0, (frontCameraCheck->isChecked() ? 1 : 0));
+                lidarContainerWidget->setFixedSize(halfWidth, height);
+            }
+        }
+        else if (count == 3) {
+            int thirdWidth = width / 3;
+            cameraFeedLayout->addWidget(frontCameraLabel, 0, 0);
+            frontCameraLabel->setFixedSize(thirdWidth, height);
+
+            cameraFeedLayout->addWidget(rearCameraLabel, 0, 1);
+            rearCameraLabel->setFixedSize(thirdWidth, height);
+
+            cameraFeedLayout->addWidget(lidarContainerWidget, 0, 2);
+            lidarContainerWidget->setFixedSize(thirdWidth, height);
+        }
+
+        mainLayout->addLayout(cameraFeedLayout);
+    }
+};
+
+testing::testing(QWidget* parent)
+    : QMainWindow(parent), d(new Private)
+{
+    // Set up central widget
+    QWidget* centralWidget = new QWidget(this);
+    setCentralWidget(centralWidget);
+
+    d->mainLayout = new QVBoxLayout(centralWidget);
+
+    // Title
+    QLabel* title = new QLabel("Instrument Cluster", this);
+    QFont titleFont("Algerian", 40);
+    title->setFont(titleFont);
+    title->setAlignment(Qt::AlignCenter);
+    d->mainLayout->addWidget(title);
+
+    // Sensor checkboxes
+    QFrame* sensorFrame = new QFrame(this);
+    sensorFrame->setFrameShape(QFrame::StyledPanel);
+    QHBoxLayout* sensorLayout = new QHBoxLayout(sensorFrame);
+
+    d->frontCameraCheck = new QCheckBox("Front Camera", this);
+    d->backCameraCheck = new QCheckBox("Rear Camera", this);
+    d->lidarCheck = new QCheckBox("Lidar", this);
+
+    sensorLayout->addWidget(d->frontCameraCheck);
+    sensorLayout->addWidget(d->backCameraCheck);
+    sensorLayout->addWidget(d->lidarCheck);
+    d->mainLayout->addWidget(sensorFrame);
+
+    // Camera feeds
+    d->frontCameraLabel = new QLabel(this);
+    d->rearCameraLabel = new QLabel(this);
+    d->lidarContainerWidget->setStyleSheet("background-color: black;");
+    d->frontCameraLabel->setStyleSheet("background-color: black;");
+    d->rearCameraLabel->setStyleSheet("background-color: black;");
+
+    d->mainLayout->addLayout(d->cameraFeedLayout);
+
+    // Checkbox signal-slot connections
+    connect(d->frontCameraCheck, &QCheckBox::stateChanged, this, [=]() { d->updateLayout(); });
+    connect(d->backCameraCheck, &QCheckBox::stateChanged, this, [=]() { d->updateLayout(); });
+    connect(d->lidarCheck, &QCheckBox::stateChanged, this, [=]() {
+        if (d->lidarCheck->isChecked()) {
+            d->lidarContainerWidget->setStyleSheet("background-color: green;");
+
+            // Start the LiDAR process
+            QString program = "C:\\Users\\cim-security\\Desktop\\pcl_cpp\\cloud_viewer\\build\\Debug\\lidar_visualizer";
+            d->lidarProcess->startDetached(program, QStringList());
+
+            Sleep(1000);
+
+            d->lidarConsoleHandle = FindWindowA(NULL, "Real-time LiDAR Viewer");
+            if (d->lidarConsoleHandle) {
+                SetWindowTextA(d->lidarConsoleHandle, "");
+                SetParent(d->lidarConsoleHandle, (HWND)d->lidarContainerWidget->winId());
+                MoveWindow(d->lidarConsoleHandle, 0, 0, 550, 550, TRUE);
+                LONG style = GetWindowLong(d->lidarConsoleHandle, GWL_STYLE);
+                style &= ~WS_CAPTION;
+                SetWindowLong(d->lidarConsoleHandle, GWL_STYLE, style);
+            }
+            else {
+                qDebug("Failed to find LiDAR console window.");
+            }
+        }
+        else {
+            d->lidarContainerWidget->setStyleSheet("background-color: black;");
+            if (d->lidarProcess->state() == QProcess::Running) {
+                d->lidarProcess->kill();
+            }
+
+            if (d->lidarConsoleHandle) {
+                SetParent(d->lidarConsoleHandle, NULL);
+                ShowWindow(d->lidarConsoleHandle, SW_HIDE);
+            }
+        }
+        d->updateLayout();
+    });
+
+    d->updateLayout();
+}
+
+testing::~testing() {
+    if (d->frontCamera.isOpened()) d->frontCamera.release();
+    if (d->rearCamera.isOpened()) d->rearCamera.release();
+    if (d->lidarProcess->state() == QProcess::Running) d->lidarProcess->kill();
+    delete d->frontFrameTimer;
+    delete d->rearFrameTimer;
+    delete d->lidarProcess;
+    delete d;
+}
