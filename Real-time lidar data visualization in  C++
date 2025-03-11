@@ -1,0 +1,165 @@
+#include <iostream>
+#include <boost/asio.hpp>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/visualization/pcl_visualizer.h>
+#include <thread>
+#include <mutex>
+#include <atomic>
+
+// Constants for LiDAR packet structure
+const int UDP_PACKET_SIZE = 1206;
+const int PORT = 2368;  // Default UDP port for VLP-16
+const int BLOCKS_PER_PACKET = 12;
+const int CHANNELS_PER_BLOCK = 32;
+const int POINTS_PER_CLOUD = 1900;  // Points threshold for displaying the cloud
+
+// Mutex to protect point cloud data
+std::mutex cloud_mutex;
+
+// Atomic flag to control cloud updates
+std::atomic<bool> is_cloud_ready(false);
+
+// Helper function to parse VLP-16 packets
+void parseLidarPacket(const std::vector<char>& recv_buffer, pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud) {
+    const uint16_t FLAG = 0xEEFF;
+    const float DISTANCE_RESOLUTION = 0.002f; // Distance resolution in meters (2mm)
+    size_t offset = 0;
+
+    // Lock the cloud to ensure thread safety while modifying it
+    std::lock_guard<std::mutex> lock(cloud_mutex);
+
+    for (int block_idx = 0; block_idx < BLOCKS_PER_PACKET; ++block_idx) {
+        // Parse the flag
+        uint16_t flag = reinterpret_cast<const uint16_t>(&recv_buffer[offset]);
+        if (flag != FLAG) {
+            std::cerr << "Invalid block flag!" << std::endl;
+            return;
+        }
+
+        // Parse azimuth
+        uint16_t azimuth = reinterpret_cast<const uint16_t>(&recv_buffer[offset + 2]);
+
+        // Parse channels
+        for (int channel_idx = 0; channel_idx < CHANNELS_PER_BLOCK; ++channel_idx) {
+            uint16_t distance = reinterpret_cast<const uint16_t>(&recv_buffer[offset + 4 + channel_idx * 3]);
+            uint8_t reflectivity = recv_buffer[offset + 4 + channel_idx * 3 + 2];
+
+            // Calculate Cartesian coordinates
+            float distance_m = distance * DISTANCE_RESOLUTION;
+            float angle_rad = static_cast<float>(azimuth) * 0.01f * M_PI / 180.0f;
+            float x = distance_m * std::cos(angle_rad);
+            float y = distance_m * std::sin(angle_rad);
+            float z = static_cast<float>(channel_idx) * 0.02f; // Vertical separation (example)
+
+            // Add the point to the cloud
+            pcl::PointXYZI point;
+            point.x = x;
+            point.y = y;
+            point.z = z;
+            point.intensity = reflectivity;
+            cloud->push_back(point);
+        }
+
+        // Move to the next block
+        offset += 100; // Each block is 100 bytes
+    }
+
+    std::cout << "Parsed one packet with " << cloud->size() << " points." << std::endl;
+
+    // Indicate that the cloud is ready for visualization
+    is_cloud_ready.store(true);
+}
+
+// Function to receive LiDAR data via UDP
+void receiveLidarData(boost::asio::io_service& io_service, pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud) {
+    try {
+        // Set up UDP socket
+        boost::asio::ip::udp::endpoint endpoint(boost::asio::ip::udp::v4(), PORT);
+        boost::asio::ip::udp::socket socket(io_service, endpoint);
+
+        std::vector<char> recv_buffer(UDP_PACKET_SIZE);
+
+        while (true) {
+            // Receive data from the LiDAR
+            boost::asio::ip::udp::endpoint sender_endpoint;
+            size_t len = socket.receive_from(boost::asio::buffer(recv_buffer), sender_endpoint);
+
+            if (len == UDP_PACKET_SIZE) {
+                // Parse the received packet and update the point cloud
+                parseLidarPacket(recv_buffer, cloud);
+            }
+            else {
+                std::cerr << "Received invalid packet size: " << len << std::endl;
+            }
+        }
+    }
+    catch (const boost::system::system_error& e) {
+        std::cerr << "Error during UDP socket communication: " << e.what() << std::endl;
+    }
+}
+
+// Function to visualize the point cloud in real-time
+void visualizePointCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud) {
+    pcl::visualization::PCLVisualizer viewer("Real-Time LiDAR Viewer");
+
+    // Resize the window (Width x Height)
+    viewer.setSize(300, 300);  // Adjust the size to your preference
+
+    // Create a PointCloud object to be visualized
+    viewer.addPointCloud<pcl::PointXYZI>(cloud, "cloud");
+    viewer.setBackgroundColor(0, 0, 0); // Set the background color to black
+    viewer.initCameraParameters(); // Initialize camera parameters
+
+
+
+    // Zoom out by adjusting the camera position
+    // The camera is looking at the center of the point cloud (0, 0, 0), and we move it further away along the z-axis
+    viewer.setCameraPosition(0, 0, 40,  // Camera position (x, y, z) - move the camera further back along the Z-axis
+        0, 0, 0,   // Look at point (x, y, z) - the center of the point cloud
+        0, 1, 0);  // Up direction (x, y, z) - the Y-axis as the up vector
+
+    // Create a second cloud for display (double buffering)
+    pcl::PointCloud<pcl::PointXYZI>::Ptr display_cloud(new pcl::PointCloud<pcl::PointXYZI>);
+
+    // Continuously update the viewer
+    while (!viewer.wasStopped()) {
+        // Only update the visualizer if the new cloud is ready
+        if (is_cloud_ready.load()) {
+            // Lock the cloud to ensure thread safety
+            {
+                std::lock_guard<std::mutex> lock(cloud_mutex);
+                *display_cloud = *cloud;  // Copy the current cloud to the display cloud
+                cloud->clear();  // Clear the main cloud for next data
+            }
+
+            // Update the point cloud in the viewer
+            viewer.updatePointCloud<pcl::PointXYZI>(display_cloud, "cloud");
+
+            // Reset the flag to indicate that the cloud was processed
+            is_cloud_ready.store(false);
+        }
+
+        // Spin the viewer to update the visualization window with minimal blocking
+        viewer.spinOnce(100); // 10ms delay to avoid high CPU usage
+    }
+}
+
+int main() {
+    boost::asio::io_service io_service;
+
+    // Create a point cloud to store LiDAR data
+    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>);
+
+    // Run UDP receiver in a separate thread
+    std::thread receiver_thread(receiveLidarData, std::ref(io_service), std::ref(cloud));
+
+    // Run the visualizer in a separate thread
+    std::thread visualizer_thread(visualizePointCloud, std::ref(cloud));
+
+    // Join the threads (cleanup)
+    receiver_thread.join();
+    visualizer_thread.join();
+
+    return 0;
+}
