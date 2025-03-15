@@ -1,0 +1,18 @@
+#ifndef TESTING_H
+#define TESTING_H
+
+#include <QMainWindow>
+
+class testing : public QMainWindow {
+    Q_OBJECT
+
+public:
+    explicit testing(QWidget* parent = nullptr);
+    ~testing();
+
+private:
+    class Private;
+    Private* d;
+};
+
+#endif // TESTING_H
